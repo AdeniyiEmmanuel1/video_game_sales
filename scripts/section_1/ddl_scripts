@@ -1,0 +1,163 @@
+============================================================
+   VIDEO GAME SALES — ETL STORED PROCEDURE
+   SQL Server 2016+
+   
+   Dashboard Source  : Dashboard_1.png
+   Dataset           : Video Game Sales (vgsales)
+   
+   SECTIONS
+   ─────────────────────────────────────────────────────────────
+   SECTION 1 │ EXTRACT   – Load raw CSV into a staging table
+   SECTION 2 │ TRANSFORM – Cleanse, enrich, and validate
+   SECTION 3 │ LOAD      – Insert clean data into final tables
+   ============================================================ */
+ 
+ 
+USE VideoGameSalesDB;
+GO
+ 
+/* ────────────────────────────────────────────────────────────
+   PRE-REQUISITE SCHEMAS
+   ──────────────────────────────────────────────────────────── */
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'raw')
+    EXEC('CREATE SCHEMA raw');
+GO
+ 
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'staging')
+    EXEC('CREATE SCHEMA staging');
+GO
+ 
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'clean')
+    EXEC('CREATE SCHEMA clean');
+GO
+ 
+ 
+/* ============================================================
+   CREATING STORED PROCEDURE
+   ============================================================ */
+PRINT '============================================================='
+PRINT 'STORED PROCEDURE: LOADING RAW LAYER';
+PRINT '============================================================='
+PRINT '============================================================='
+PRINT 'Script Purpose:
+        The purpose of this stored procedure is to load data into
+        the Raw schema from external CSV files.
+        It performs the following actions:
+        -   Truncates the raw table before loading fresh data
+        -   Uses the BULK INSERT command to load data from the
+            CSV source file into the raw landing table
+ 
+        Parameter: None
+                   This Stored Procedure does not accept any parameters'
+PRINT '============================================================='
+ 
+ 
+/* ── 1-A  Raw landing table ──────────────────────────────────────
+   All columns are declared as VARCHAR so that no row is rejected
+   due to a type mismatch during the initial load.  Type casting
+   and validation happen in Section 2 (Transform).               */
+IF OBJECT_ID('raw.vgsales_import', 'U') IS NOT NULL
+    DROP TABLE raw.vgsales_import;
+ 
+CREATE TABLE raw.vgsales_import
+(
+    import_id        INT            IDENTITY(1,1) NOT NULL,
+    rank_raw         VARCHAR(10)    NULL,          -- game chart rank as text
+    name_raw         VARCHAR(500)   NULL,          -- game title as text
+    platform_raw     VARCHAR(50)    NULL,          -- platform code as text
+    year_raw         VARCHAR(10)    NULL,          -- release year as text (validated later)
+    genre_raw        VARCHAR(100)   NULL,          -- genre label as text
+    publisher_raw    VARCHAR(200)   NULL,          -- publisher name as text
+    na_sales_raw     VARCHAR(20)    NULL,          -- North America sales (millions) as text
+    eu_sales_raw     VARCHAR(20)    NULL,          -- Europe sales (millions) as text
+    jp_sales_raw     VARCHAR(20)    NULL,          -- Japan sales (millions) as text
+    other_sales_raw  VARCHAR(20)    NULL,          -- Rest of World sales (millions) as text
+    global_sales_raw VARCHAR(20)    NULL,          -- Global sales (millions) as text
+    load_timestamp   DATETIME2      NOT NULL DEFAULT SYSUTCDATETIME(), -- audit: when the row was loaded
+    source_file      VARCHAR(260)   NOT NULL DEFAULT 'vgsales.csv',    -- audit: source file name
+    CONSTRAINT PK_raw_vgsales PRIMARY KEY (import_id)
+);
+GO
+ 
+ 
+/* ── 1-B  Extract stored procedure ───────────────────────────── */
+CREATE OR ALTER PROCEDURE raw.usp_ExtractVGSales AS
+ 
+DECLARE @Start_Time       DATETIME,   -- records start time for each table load
+        @End_Time         DATETIME,   -- records end time for each table load
+        @Batch_Start_Time DATETIME,   -- records start time for the full batch
+        @Batch_End_Time   DATETIME;   -- records end time for the full batch
+ 
+BEGIN
+    BEGIN TRY  -- wraps entire procedure to catch and report any runtime errors
+ 
+        SET @Batch_Start_Time = GETDATE();  -- capture overall batch start time
+ 
+        PRINT '==========================================================='
+        PRINT 'Loading Raw Layer';
+        PRINT '==========================================================='
+ 
+        PRINT '-----------------------------------------------------------'
+        PRINT 'Loading Video Game Sales Source File';
+        PRINT '-----------------------------------------------------------'
+ 
+        /* ── Table 1: raw.vgsales_import ──────────────────────────────
+           Loads all game sales records from the vgsales CSV source file */
+        PRINT '==========================================================='
+        PRINT 'Loading Table: raw.vgsales_import';
+        PRINT '==========================================================='
+ 
+        SET @Start_Time = GETDATE();  -- capture table load start time
+ 
+        PRINT '>>> Truncating Table: raw.vgsales_import';
+        TRUNCATE TABLE raw.vgsales_import;  -- clear existing data before reload to avoid duplicates
+ 
+        BULK INSERT raw.vgsales_import
+        (
+            rank_raw, name_raw, platform_raw, year_raw, genre_raw,
+            publisher_raw, na_sales_raw, eu_sales_raw, jp_sales_raw,
+            other_sales_raw, global_sales_raw
+        )
+        FROM 'C:\ETL\Source\vgsales.csv'
+        WITH
+        (
+            FIRSTROW        = 2,          -- row 1 is the header; data begins at row 2
+            FIELDTERMINATOR = ',',        -- comma-separated values
+            ROWTERMINATOR   = '\n',       -- each record ends with a line feed
+            CODEPAGE        = '65001',    -- UTF-8 encoding to handle special characters
+            TABLOCK,                      -- table-level lock for faster bulk load performance
+            MAXERRORS       = 100         -- allow up to 100 bad rows before aborting
+        );
+ 
+        SET @End_Time = GETDATE();  -- capture table load end time
+ 
+        PRINT '>> Load Duration: ' + CAST(DATEDIFF(SECOND, @Start_Time, @End_Time) AS NVARCHAR) + ' seconds'
+        PRINT '>> ---------------------------------------------------------'
+ 
+        /*  SELECT *                       -- uncomment to visually inspect loaded rows
+            FROM raw.vgsales_import;
+ 
+            SELECT COUNT(*)               -- uncomment to verify row count after load
+            FROM raw.vgsales_import;   */
+ 
+        /* ── Batch completion summary ─────────────────────────────── */
+        SET @Batch_End_Time = GETDATE();  -- capture overall batch end time
+ 
+        PRINT '=================================================='
+        PRINT ' ------ Batch Loading Completed ------------------'
+        PRINT '>> Batch Load Duration: ' + CAST(DATEDIFF(SECOND, @Batch_Start_Time, @Batch_End_Time) AS NVARCHAR) + ' seconds'
+        PRINT '=================================================='
+ 
+    END TRY
+    BEGIN CATCH  -- catches any error that occurred during the bulk load
+        PRINT '=================================================='
+        PRINT 'ERROR OCCURRED DURING LOADING RAW LAYER'
+        PRINT 'Error Number : ' + CAST(ERROR_NUMBER()  AS NVARCHAR)   -- casting integer error number to string for PRINT
+        PRINT 'Error Message: ' + CAST(ERROR_MESSAGE() AS NVARCHAR)   -- full error description
+        PRINT 'Error Line   : ' + CAST(ERROR_LINE()    AS NVARCHAR)   -- line number where the error was raised
+        PRINT '=================================================='
+    END CATCH
+ 
+END;
+GO
+ 
